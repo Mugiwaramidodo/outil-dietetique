@@ -6,11 +6,11 @@ from reportlab.lib.pagesizes import A4
 from reportlab.lib.units import cm
 from reportlab.pdfgen import canvas
 
-# --------- Configuration de l'application ---------
+# --------- Configuration ---------
 st.set_page_config(page_title="Outil diététique – Fiches clients", page_icon="🥗", layout="wide")
 
-DATA_DIR   = os.path.join(os.path.dirname(__file__), "data")
-CSV_PATH   = os.path.join(DATA_DIR, "clients.csv")
+DATA_DIR = os.path.join(os.path.dirname(__file__), "data")
+CSV_PATH = os.path.join(DATA_DIR, "clients.csv")
 os.makedirs(DATA_DIR, exist_ok=True)
 
 COLUMNS = [
@@ -18,7 +18,7 @@ COLUMNS = [
     "taille_cm","poids_kg","poids_initial_kg","objectif","sport","seances_semaine",
     "grignote","repas_par_jour","aliments_ok","aliments_ko","allergies","antecedents",
     "traitements","tabac","alcool","digestion","appetit",
-    "imc","imc_cat","dej_mj","dej_kcal","pct_perte_prise"
+    "imc","imc_cat","dej_mj","dej_kcal","dej_kcal_nap","pct_perte_prise"
 ]
 
 # --------- Fonctions de base ---------
@@ -52,16 +52,18 @@ def compute_imc(poids, taille_cm):
         cat = "Obésité"
     return round(imc, 2), cat
 
-def compute_dej(sexe, poids, taille_cm, age):
+# --------- 💪 DEJ avec NAP ---------
+def compute_dej(sexe, poids, taille_cm, age, nap=1.63):
     if not all([sexe, poids, taille_cm, age]) or min(poids, taille_cm, age) <= 0:
-        return None, None
+        return None, None, None
     taille_m = taille_cm / 100.0
     if str(sexe).lower().startswith("f"):
         dej_mj = 0.963 * (poids ** 0.48) * (taille_m ** 0.50) * (age ** -0.13)
     else:
         dej_mj = 1.083 * (poids ** 0.48) * (taille_m ** 0.50) * (age ** -0.13)
     dej_kcal = dej_mj * 238.8459
-    return round(dej_mj, 3), round(dej_kcal, 0)
+    dej_kcal_nap = dej_kcal * nap
+    return round(dej_mj, 3), round(dej_kcal, 0), round(dej_kcal_nap, 0)
 
 def pct_perte_prise(p0, p):
     if not p0 or not p or p0 <= 0:
@@ -92,6 +94,7 @@ def generate_pdf(client):
     line("Poids (kg)", client['poids_kg'])
     line("IMC", f"{client['imc']} ({client['imc_cat']})")
     line("DEJ (kcal)", client['dej_kcal'])
+    line("DEJ × NAP (1.63)", client['dej_kcal_nap'])
     line("Objectif", client['objectif'])
     line("Sport", client['sport'])
     line("Séances/semaine", client['seances_semaine'])
@@ -175,13 +178,14 @@ def page_add_edit():
 
         st.markdown("---")
         imc_val, imc_cat = compute_imc(poids, taille)
-        dej_mj, dej_kcal = compute_dej(sexe, poids, taille, age)
+        dej_mj, dej_kcal, dej_kcal_nap = compute_dej(sexe, poids, taille, age)
         pct = pct_perte_prise(p_init, poids)
 
-        m1,m2,m3 = st.columns(3)
+        m1,m2,m3,m4 = st.columns(4)
         m1.metric("IMC", imc_val if imc_val else "—", imc_cat or "")
         m2.metric("DEJ (MJ)", dej_mj if dej_mj else "—")
         m3.metric("DEJ (kcal)", dej_kcal if dej_kcal else "—")
+        m4.metric("DEJ × NAP (1.63)", dej_kcal_nap if dej_kcal_nap else "—")
 
         submitted = st.form_submit_button("💾 Enregistrer")
         now = dt.datetime.now().isoformat(timespec="seconds")
@@ -199,7 +203,7 @@ def page_add_edit():
                     "traitements": traitements, "tabac": tabac, "alcool": alcool,
                     "digestion": digestion, "appetit": appetit,
                     "imc": imc_val, "imc_cat": imc_cat, "dej_mj": dej_mj,
-                    "dej_kcal": dej_kcal, "pct_perte_prise": pct
+                    "dej_kcal": dej_kcal, "dej_kcal_nap": dej_kcal_nap, "pct_perte_prise": pct
                 }
                 df = pd.concat([df, pd.DataFrame([new])], ignore_index=True)
                 save_df(df)
@@ -218,7 +222,8 @@ def page_add_edit():
                         "antecedents": antecedents, "traitements": traitements,
                         "tabac": tabac, "alcool": alcool, "digestion": digestion,
                         "appetit": appetit, "imc": imc_val, "imc_cat": imc_cat,
-                        "dej_mj": dej_mj, "dej_kcal": dej_kcal, "pct_perte_prise": pct
+                        "dej_mj": dej_mj, "dej_kcal": dej_kcal,
+                        "dej_kcal_nap": dej_kcal_nap, "pct_perte_prise": pct
                     }.items():
                         df.loc[idx, key] = value
                     save_df(df)
@@ -255,20 +260,21 @@ def page_list():
         ql = q.lower()
         mask = df.apply(lambda row: any(str(v).lower().find(ql)>=0 for v in row.values if pd.notna(v)), axis=1)
         df = df[mask]
-    st.dataframe(df[["nom","prenom","sexe","age","poids_kg","imc","dej_kcal","objectif","sport"]], use_container_width=True)
+    st.dataframe(df[["nom","prenom","sexe","age","poids_kg","imc","dej_kcal","dej_kcal_nap","objectif","sport"]], use_container_width=True)
 
 # --------- Page calcul rapide ---------
 def page_quick():
-    st.header("Calcul rapide IMC / DEJ")
+    st.header("Calcul rapide IMC / DEJ / NAP")
     sexe = st.selectbox("Sexe", ["Femme","Homme"])
     poids = st.number_input("Poids (kg)", min_value=0.0)
     taille = st.number_input("Taille (cm)", min_value=0.0)
     age = st.number_input("Âge", min_value=0)
     imc_val, imc_cat = compute_imc(poids, taille)
-    dej_mj, dej_kcal = compute_dej(sexe, poids, taille, age)
+    dej_mj, dej_kcal, dej_kcal_nap = compute_dej(sexe, poids, taille, age)
     st.metric("IMC", imc_val if imc_val else "—", imc_cat or "")
     st.metric("DEJ (MJ)", dej_mj if dej_mj else "—")
     st.metric("DEJ (kcal)", dej_kcal if dej_kcal else "—")
+    st.metric("DEJ × NAP (1.63)", dej_kcal_nap if dej_kcal_nap else "—")
 
 # --------- Router ---------
 if page == "Ajouter / Éditer":
@@ -277,4 +283,3 @@ elif page == "Liste (A→Z)":
     page_list()
 else:
     page_quick()
-
