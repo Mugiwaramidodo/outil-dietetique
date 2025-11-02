@@ -1,15 +1,29 @@
-import os
+import os, uuid, datetime as dt
 import pandas as pd
 import streamlit as st
 from io import BytesIO
 from reportlab.lib.pagesizes import A4
-from reportlab.lib.units import cm
 from reportlab.pdfgen import canvas
+from reportlab.lib.units import cm
 
-# ---------------- CONFIGURATION ----------------
-st.set_page_config(page_title="Outil diététique – Ration & Répartition", page_icon="🥗", layout="wide")
+# ============ CONFIG ============
+st.set_page_config(page_title="Outil diététique – Cabinet", page_icon="🥗", layout="wide")
 
-# ---------------- TABLE DES ALIMENTS ----------------
+# Données clients locales (CSV)
+DATA_DIR = os.path.join(os.path.dirname(__file__), "data")
+CSV_PATH = os.path.join(DATA_DIR, "clients.csv")
+os.makedirs(DATA_DIR, exist_ok=True)
+
+# Colonnes (superset pour compat CSV existant)
+COLUMNS = [
+    "id","date_creation","date_maj","nom","prenom","sexe","age",
+    "taille_cm","poids_kg","poids_initial_kg","objectif","sport","seances_semaine",
+    "grignote","repas_par_jour","aliments_ok","aliments_ko","allergies","antecedents",
+    "traitements","tabac","alcool","digestion","appetit",
+    "imc","imc_cat","dej_mj","dej_kcal","nap","pct_perte_prise"
+]
+
+# Table aliments (pour 100 g/ml) + énergie en kJ/100
 ALIMENTS = {
     "Lait 1/2 écrémé": {"P": 3, "L": 2, "G": 5, "kJ": 200},
     "Yaourt nature": {"P": 5, "L": 2, "G": 6, "kJ": 250},
@@ -26,135 +40,283 @@ ALIMENTS = {
     "Sucre": {"P": 0, "L": 0, "G": 100, "kJ": 1700},
 }
 
-# ---------------- CALCUL RATION ----------------
-def calcul_ration(selection):
-    total_P = total_L = total_G = total_kJ = 0
-    data = []
-    for alim, qte in selection.items():
-        if alim in ALIMENTS:
-            p = ALIMENTS[alim]["P"] * qte / 100
-            l = ALIMENTS[alim]["L"] * qte / 100
-            g = ALIMENTS[alim]["G"] * qte / 100
-            kj = ALIMENTS[alim]["kJ"] * qte / 100
-            kcal = (p * 4) + (g * 4) + (l * 9)
-            data.append([alim, qte, round(p,1), round(l,1), round(g,1), round(kcal,1), round(kj,1)])
-            total_P += p
-            total_L += l
-            total_G += g
-            total_kJ += kj
-    total_kcal = (total_P * 4) + (total_G * 4) + (total_L * 9)
-    return data, total_P, total_L, total_G, total_kcal, total_kJ
+# ============ UTILS ============
+def load_df():
+    if os.path.exists(CSV_PATH):
+        df = pd.read_csv(CSV_PATH)
+        for c in COLUMNS:
+            if c not in df.columns:
+                df[c] = None
+        return df[COLUMNS]
+    df = pd.DataFrame(columns=COLUMNS)
+    df.to_csv(CSV_PATH, index=False)
+    return df
 
-# ---------------- PDF ----------------
-def generate_pdf(df_ration, P, L, G, kcal, kJ, df_repartition, total_jour_kcal, total_jour_kJ):
-    buffer = BytesIO()
-    c = canvas.Canvas(buffer, pagesize=A4)
-    c.setFont("Helvetica-Bold", 16)
-    c.drawString(2 * cm, 28 * cm, "🥗 Rapport diététique – Ration & Répartition")
-    c.setFont("Helvetica", 11)
-    y = 26.5 * cm
+def save_df(df):
+    df.to_csv(CSV_PATH, index=False)
 
-    # Totaux globaux
-    c.drawString(2 * cm, y, f"Protéines : {P:.1f} g")
-    c.drawString(6 * cm, y, f"Lipides : {L:.1f} g")
-    c.drawString(10 * cm, y, f"Glucides : {G:.1f} g")
-    y -= 0.6 * cm
-    c.drawString(2 * cm, y, f"Énergie totale : {kcal:.1f} kcal ({kJ:.1f} kJ)")
-    y -= 1.0 * cm
+def compute_imc(poids, taille_cm):
+    if not poids or not taille_cm or taille_cm <= 0:
+        return None, None
+    t = taille_cm/100
+    imc = poids/(t*t)
+    if imc < 18.5: cat = "Insuffisance pondérale"
+    elif imc < 25: cat = "Corpulence normale"
+    elif imc < 30: cat = "Surpoids"
+    else: cat = "Obésité"
+    return round(imc,2), cat
 
-    # Tableau ration
-    c.setFont("Helvetica-Bold", 12)
-    c.drawString(2 * cm, y, "Tableau de ration :")
-    y -= 0.6 * cm
-    c.setFont("Helvetica", 10)
-    for _, row in df_ration.iterrows():
-        txt = f"- {row['Aliment']} ({row['Quantité (g/ml)']} g) : {row['Énergie (kcal)']} kcal / {row['Énergie (kJ)']} kJ"
-        c.drawString(2 * cm, y, txt)
-        y -= 0.5 * cm
-        if y < 3 * cm:
-            c.showPage()
-            y = 27 * cm
+def compute_dej(sexe, poids, taille_cm, age, nap):
+    if not all([sexe, poids, taille_cm, age]) or min(poids, taille_cm, age)<=0:
+        return None, None
+    t = taille_cm/100
+    if str(sexe).lower().startswith("f"):
+        dej_mj = 0.963*(poids**0.48)*(t**0.50)*(age**-0.13)
+    else:
+        dej_mj = 1.083*(poids**0.48)*(t**0.50)*(age**-0.13)
+    dej_mj *= nap
+    dej_kcal = dej_mj*238.8459
+    return round(dej_mj,3), round(dej_kcal,0)
 
-    # Nouvelle page pour répartition
-    c.showPage()
-    c.setFont("Helvetica-Bold", 12)
-    c.drawString(2 * cm, 28 * cm, "🍽 Répartition énergétique par repas")
-    y = 26.5 * cm
-    c.setFont("Helvetica", 10)
-    for _, row in df_repartition.iterrows():
-        c.drawString(2 * cm, y, f"{row['Repas']} : {row['Total (kcal)']} kcal / {row['Total (kJ)']} kJ")
-        y -= 0.6 * cm
+def pct_perte_prise(p0, p):
+    if not p0 or not p or p0<=0: return None
+    return round(((p0-p)/p0)*100,2)
 
-    y -= 0.8 * cm
-    c.setFont("Helvetica-Bold", 11)
-    c.drawString(2 * cm, y, f"⚡ Total journée : {total_jour_kcal:.1f} kcal ({total_jour_kJ:.1f} kJ)")
-    c.showPage()
-    c.save()
-    pdf = buffer.getvalue()
-    buffer.close()
-    return pdf
+def sort_alpha(df):
+    return df.sort_values(["nom","prenom"], key=lambda s: s.str.lower(), na_position="last").reset_index(drop=True)
 
-# ---------------- PAGE PRINCIPALE ----------------
-st.title("💪 Calcul de ration et répartition énergétique")
+def calcul_ration(selection_dict):
+    total_P=total_L=total_G=total_kJ=0
+    rows=[]
+    for alim,qte in selection_dict.items():
+        if alim not in ALIMENTS or qte<=0: continue
+        P=ALIMENTS[alim]["P"]*qte/100
+        L=ALIMENTS[alim]["L"]*qte/100
+        G=ALIMENTS[alim]["G"]*qte/100
+        kJ=ALIMENTS[alim]["kJ"]*qte/100
+        kcal=P*4+G*4+L*9
+        rows.append([alim,qte,round(P,1),round(L,1),round(G,1),round(kcal,1),round(kJ,1)])
+        total_P+=P; total_L+=L; total_G+=G; total_kJ+=kJ
+    total_kcal=total_P*4+total_G*4+total_L*9
+    df=pd.DataFrame(rows, columns=["Aliment","Quantité (g/ml)","Prot (g)","Lip (g)","Gluc (g)","Énergie (kcal)","Énergie (kJ)"])
+    return df, round(total_P,1), round(total_L,1), round(total_G,1), round(total_kcal,1), round(total_kJ,1)
 
-st.markdown("### 🧮 Sélection d’aliments multiples")
-n = st.number_input("Nombre d’aliments :", min_value=1, max_value=15, value=3)
-selection = {}
-cols = st.columns(3)
-for i in range(n):
-    alim = cols[0].selectbox(f"Aliment #{i+1}", list(ALIMENTS.keys()), key=f"alim_{i}")
-    qte = cols[1].number_input(f"Quantité (g/ml) #{i+1}", min_value=0.0, step=10.0, value=100.0, key=f"qte_{i}")
-    selection[alim] = qte
+# ============ PDFS ============
+def pdf_fiche_client(client):
+    buf=BytesIO()
+    c=canvas.Canvas(buf, pagesize=A4)
+    c.setFont("Helvetica-Bold",14); c.drawString(2*cm, 28*cm, "FICHE CLIENT DIÉTÉTIQUE")
+    c.setFont("Helvetica",11); y=26.8*cm
+    def line(lbl,val):
+        nonlocal y
+        c.drawString(2*cm,y,f"{lbl}: {val}"); y-=0.6*cm
+    line("Nom", f"{client.get('nom','')} {client.get('prenom','')}")
+    line("Sexe", client.get("sexe","")); line("Âge", client.get("age",""))
+    line("Taille (cm)", client.get("taille_cm","")); line("Poids (kg)", client.get("poids_kg",""))
+    line("IMC", f"{client.get('imc','')} ({client.get('imc_cat','')})")
+    line("NAP", client.get("nap","")); line("DEJ (kcal)", client.get("dej_kcal",""))
+    line("Objectif", client.get("objectif","")); line("Sport", client.get("sport",""))
+    line("Séances/sem.", client.get("seances_semaine","")); line("Grignote", client.get("grignote",""))
+    line("Digestion", client.get("digestion","")); line("Appétit", client.get("appetit",""))
+    line("MAJ", client.get("date_maj",""))
+    c.showPage(); c.save(); pdf=buf.getvalue(); buf.close(); return pdf
 
-data, P, L, G, kcal, kJ = calcul_ration(selection)
-df_ration = pd.DataFrame(data, columns=["Aliment", "Quantité (g/ml)", "Prot (g)", "Lip (g)", "Gluc (g)", "Énergie (kcal)", "Énergie (kJ)"])
-st.table(df_ration)
+def pdf_ration_repartition(df_ration, P,L,G,kcal,kJ, df_rep, total_kcal_j, total_kJ_j):
+    buf=BytesIO()
+    c=canvas.Canvas(buf, pagesize=A4)
+    c.setFont("Helvetica-Bold",16); c.drawString(2*cm,28*cm,"🥗 Rapport – Ration & Répartition")
+    c.setFont("Helvetica",11); y=26.8*cm
+    c.drawString(2*cm,y, f"Totaux : Prot {P} g  |  Lip {L} g  |  Gluc {G} g"); y-=0.6*cm
+    c.drawString(2*cm,y, f"Énergie totale : {kcal} kcal  ({kJ} kJ)"); y-=0.8*cm
 
-st.markdown("### 🔢 Totaux globaux")
-c1, c2, c3, c4, c5 = st.columns(5)
-c1.metric("Protéines (g)", f"{P:.1f}")
-c2.metric("Lipides (g)", f"{L:.1f}")
-c3.metric("Glucides (g)", f"{G:.1f}")
-c4.metric("Énergie (kcal)", f"{kcal:.1f}")
-c5.metric("Énergie (kJ)", f"{kJ:.1f}")
+    c.setFont("Helvetica-Bold",12); c.drawString(2*cm,y,"Tableau de ration :"); y-=0.6*cm
+    c.setFont("Helvetica",10)
+    for _,row in df_ration.iterrows():
+        t=f"- {row['Aliment']} ({row['Quantité (g/ml)']} g) : {row['Énergie (kcal)']} kcal / {row['Énergie (kJ)']} kJ"
+        c.drawString(2*cm,y,t); y-=0.45*cm
+        if y<3*cm: c.showPage(); y=27*cm
 
-# ---------------- REPARTITION ----------------
-st.markdown("---")
-st.subheader("🍽 Répartition énergétique journalière")
+    c.showPage(); c.setFont("Helvetica-Bold",12); c.drawString(2*cm,28*cm,"🍽 Répartition par repas")
+    y=26.8*cm; c.setFont("Helvetica",10)
+    for _,row in df_rep.iterrows():
+        c.drawString(2*cm,y, f"{row['Repas']} : {row['Total (kcal)']} kcal / {row['Total (kJ)']} kJ"); y-=0.55*cm
+    y-=0.6*cm; c.setFont("Helvetica-Bold",11)
+    c.drawString(2*cm,y, f"⚡ Total journée : {total_kcal_j} kcal  ({total_kJ_j} kJ)")
+    c.showPage(); c.save(); pdf=buf.getvalue(); buf.close(); return pdf
 
-repas = ["Petit-déjeuner", "Déjeuner", "Collation", "Dîner"]
-repas_selection = {}
-for r in repas:
-    with st.expander(f"⚡ {r}"):
-        n_r = st.number_input(f"Nombre d’aliments pour {r}", min_value=0, max_value=10, value=2, key=f"nb_{r}")
-        sel = {}
-        for i in range(int(n_r)):
-            alim = st.selectbox(f"{r} - Aliment #{i+1}", list(ALIMENTS.keys()), key=f"{r}_alim_{i}")
-            qte = st.number_input(f"{r} - Quantité (g/ml) #{i+1}", min_value=0.0, step=10.0, value=100.0, key=f"{r}_qte_{i}")
-            sel[alim] = qte
-        repas_selection[r] = sel
+# ============ UI ============
+st.sidebar.title("🥗 Outil diététique – Cabinet")
+page = st.sidebar.radio("Aller à :", [
+    "Ajouter / Éditer",
+    "Liste (A→Z)",
+    "Calcul rapide",
+    "🍽 Ration & Répartition"
+])
 
-resume = []
-total_jour_kJ = total_jour_kcal = 0
-for r, sel in repas_selection.items():
-    _, _, _, _, kcal_r, kJ_r = calcul_ration(sel)
-    total_jour_kJ += kJ_r
-    total_jour_kcal += kcal_r
-    resume.append([r, round(kJ_r,1), round(kcal_r,1)])
+# ---- Page 1: Ajouter / Éditer ----
+def page_add_edit():
+    st.header("Ajouter / Modifier / Supprimer un client")
+    df = load_df()
+    mode = st.radio("Mode :", ["Ajouter", "Éditer / Supprimer"], horizontal=True)
+    selected_id, rec = None, {}
 
-df_repartition = pd.DataFrame(resume, columns=["Repas", "Total (kJ)", "Total (kcal)"])
-st.table(df_repartition)
+    if mode=="Éditer / Supprimer" and not df.empty:
+        dfv = sort_alpha(df)
+        selected_id = st.selectbox(
+            "Choisir un client",
+            options=dfv["id"].tolist(),
+            format_func=lambda _id: f"{dfv.loc[dfv['id']==_id,'nom'].values[0]} {dfv.loc[dfv['id']==_id,'prenom'].values[0]}"
+        )
+        rec = df.loc[df["id"]==selected_id].iloc[0].to_dict()
 
-st.markdown("### ✅ Total journalier")
-c1, c2 = st.columns(2)
-c1.metric("Total énergie (kJ)", f"{total_jour_kJ:.1f}")
-c2.metric("Total énergie (kcal)", f"{total_jour_kcal:.1f}")
+    with st.form("form_client", clear_on_submit=(mode=="Ajouter")):
+        c1,c2,c3,c4 = st.columns(4)
+        nom = c1.text_input("Nom", value=rec.get("nom",""))
+        prenom = c2.text_input("Prénom", value=rec.get("prenom",""))
+        sexe = c3.selectbox("Sexe", ["Femme","Homme"], index=0 if rec.get("sexe","Femme")=="Femme" else 1)
+        age = c4.number_input("Âge", min_value=0, max_value=120, value=int(rec.get("age",0) or 0))
 
-# ---------------- TELECHARGEMENT PDF ----------------
-st.markdown("---")
-pdf = generate_pdf(df_ration, P, L, G, kcal, kJ, df_repartition, total_jour_kcal, total_jour_kJ)
-st.download_button("🧾 Télécharger le rapport en PDF", data=pdf, file_name="rapport_dietetique.pdf", mime="application/pdf")
+        c5,c6,c7,c8 = st.columns(4)
+        taille = c5.number_input("Taille (cm)", min_value=0, max_value=260, value=int(rec.get("taille_cm",0) or 0))
+        poids  = c6.number_input("Poids actuel (kg)", min_value=0.0, max_value=500.0, value=float(rec.get("poids_kg",0) or 0))
+        p_init = c7.number_input("Poids initial (kg)", min_value=0.0, max_value=500.0, value=float(rec.get("poids_initial_kg",0) or 0))
+        nap    = c8.number_input("NAP (activité)", min_value=1.0, max_value=2.5, step=0.05, value=float(rec.get("nap",1.63) or 1.63))
 
-st.success("✅ Rapport complet généré avec succès !")
+        c9,c10,c11 = st.columns(3)
+        objectif = c9.selectbox("Objectif", ["Perte de poids","Prise de masse","Stabilisation","Autre"], index=["Perte de poids","Prise de masse","Stabilisation","Autre"].index(rec.get("objectif","Perte de poids") if rec.get("objectif") else "Perte de poids"))
+        sport    = c10.text_input("Sport", value=rec.get("sport",""))
+        seances  = c11.number_input("Séances/sem.", min_value=0, max_value=21, value=int(rec.get("seances_semaine",0) or 0))
+
+        imc_val, imc_cat = compute_imc(poids, taille)
+        dej_mj, dej_kcal = compute_dej(sexe, poids, taille, age, nap)
+        pct = pct_perte_prise(p_init, poids)
+
+        m1,m2,m3,m4 = st.columns(4)
+        m1.metric("IMC", imc_val if imc_val else "—", imc_cat or "")
+        m2.metric("NAP", nap)
+        m3.metric("DEJ (MJ)", dej_mj if dej_mj else "—")
+        m4.metric("DEJ (kcal)", dej_kcal if dej_kcal else "—")
+
+        submit = st.form_submit_button("💾 Enregistrer")
+        now = dt.datetime.now().isoformat(timespec="seconds")
+
+        if submit:
+            new = {
+                "id": selected_id or str(uuid.uuid4()),
+                "date_creation": rec.get("date_creation", now),
+                "date_maj": now, "nom": nom, "prenom": prenom, "sexe": sexe, "age": age,
+                "taille_cm": taille, "poids_kg": poids, "poids_initial_kg": p_init,
+                "objectif": objectif, "sport": sport, "seances_semaine": seances,
+                "imc": imc_val, "imc_cat": imc_cat, "dej_mj": dej_mj, "dej_kcal": dej_kcal, "nap": nap,
+                "pct_perte_prise": pct
+            }
+            if mode=="Ajouter":
+                df = pd.concat([df, pd.DataFrame([new])], ignore_index=True)
+            else:
+                for k,v in new.items():
+                    df.loc[df["id"]==selected_id, k] = v
+            save_df(df)
+            st.success("✅ Données enregistrées.")
+
+    if mode=="Éditer / Supprimer" and selected_id:
+        st.markdown("---")
+        client = df.loc[df["id"]==selected_id].iloc[0].to_dict()
+        pdf = pdf_fiche_client(client)
+        st.download_button("🧾 Télécharger fiche (PDF)", pdf, file_name=f"fiche_{client.get('nom','')}_{client.get('prenom','')}.pdf", mime="application/pdf")
+        st.error("⚠️ Suppression définitive")
+        if st.button("🗑️ Supprimer ce client", use_container_width=True):
+            df = df[df["id"]!=selected_id].reset_index(drop=True); save_df(df)
+            st.success("✅ Client supprimé."); st.rerun()
+
+# ---- Page 2: Liste ----
+def page_list():
+    st.header("Clients — tri alphabétique (A → Z)")
+    df = load_df()
+    if df.empty: st.info("Aucun client enregistré."); return
+    df = sort_alpha(df)
+    q = st.text_input("Recherche… (nom, prénom, sport, objectif)", "")
+    if q:
+        ql = q.lower()
+        mask = df.apply(lambda row: any(str(v).lower().find(ql)>=0 for v in row.values if pd.notna(v)), axis=1)
+        df = df[mask]
+    st.dataframe(df[["nom","prenom","sexe","age","poids_kg","imc","dej_kcal","nap","objectif","sport"]], use_container_width=True)
+
+# ---- Page 3: Calcul rapide ----
+def page_quick():
+    st.header("Calcul rapide IMC / DEJ")
+    sexe = st.selectbox("Sexe", ["Femme","Homme"])
+    poids = st.number_input("Poids (kg)", min_value=0.0)
+    taille = st.number_input("Taille (cm)", min_value=0.0)
+    age = st.number_input("Âge", min_value=0)
+    nap = st.number_input("NAP", min_value=1.0, max_value=2.5, step=0.05, value=1.63)
+    imc_val, imc_cat = compute_imc(poids, taille)
+    dej_mj, dej_kcal = compute_dej(sexe, poids, taille, age, nap)
+    st.metric("IMC", imc_val if imc_val else "—", imc_cat or "")
+    st.metric("NAP", nap)
+    st.metric("DEJ (MJ)", dej_mj if dej_mj else "—")
+    st.metric("DEJ (kcal)", dej_kcal if dej_kcal else "—")
+
+# ---- Page 4: Ration & Répartition ----
+def page_ration():
+    st.header("🍽 Calcul de ration & Répartition énergétique")
+
+    st.subheader("🧮 Sélection d’aliments multiples")
+    n = st.number_input("Nombre d’aliments :", min_value=1, max_value=20, value=3)
+    sel={}
+    cols = st.columns(3)
+    for i in range(int(n)):
+        alim = cols[0].selectbox(f"Aliment #{i+1}", list(ALIMENTS.keys()), key=f"alim_{i}")
+        qte  = cols[1].number_input(f"Quantité (g/ml) #{i+1}", min_value=0.0, step=10.0, value=100.0, key=f"qte_{i}")
+        sel[alim]=qte
+
+    df_ration, P,L,G,kcal,kJ = calcul_ration(sel)
+    if df_ration.empty:
+        st.info("Ajoute au moins un aliment avec une quantité > 0 g.")
+    else:
+        st.table(df_ration)
+        c1,c2,c3,c4,c5 = st.columns(5)
+        c1.metric("Protéines (g)", P); c2.metric("Lipides (g)", L); c3.metric("Glucides (g)", G)
+        c4.metric("Énergie (kcal)", kcal); c5.metric("Énergie (kJ)", kJ)
+
+    st.markdown("---")
+    st.subheader("🍽 Répartition par repas")
+    repas_list = ["Petit-déjeuner","Déjeuner","Collation matin","Collation après-midi","Dîner"]
+    rep_sel={}
+    for r in repas_list:
+        with st.expander(f"⚡ {r}", expanded=False):
+            nr = st.number_input(f"Nombre d’aliments pour {r}", min_value=0, max_value=15, value=0, key=f"n_{r}")
+            s={}
+            for i in range(int(nr)):
+                a = st.selectbox(f"{r} - Aliment #{i+1}", list(ALIMENTS.keys()), key=f"{r}_a_{i}")
+                q = st.number_input(f"{r} - Quantité (g/ml) #{i+1}", min_value=0.0, step=10.0, value=100.0, key=f"{r}_q_{i}")
+                s[a]=q
+            rep_sel[r]=s
+
+    resume=[]; total_kcal_j=0; total_kJ_j=0
+    for r, s in rep_sel.items():
+        df_r, _,_,_, kcal_r, kJ_r = calcul_ration(s)
+        total_kcal_j += kcal_r; total_kJ_j += kJ_r
+        resume.append([r, round(kcal_r,1), round(kJ_r,1)])
+
+    df_rep = pd.DataFrame(resume, columns=["Repas","Total (kcal)","Total (kJ)"])
+    st.table(df_rep)
+    d1,d2 = st.columns(2)
+    d1.metric("Total journée (kcal)", round(total_kcal_j,1))
+    d2.metric("Total journée (kJ)",   round(total_kJ_j,1))
+
+    st.markdown("---")
+    pdf = pdf_ration_repartition(df_ration, P,L,G,kcal,kJ, df_rep, round(total_kcal_j,1), round(total_kJ_j,1))
+    st.download_button("🧾 Télécharger le rapport ration/répartition (PDF)", data=pdf, file_name="rapport_ration_repartition.pdf", mime="application/pdf")
+
+# ---- Router ----
+if page=="Ajouter / Éditer":
+    page_add_edit()
+elif page=="Liste (A→Z)":
+    page_list()
+elif page=="Calcul rapide":
+    page_quick()
+else:
+    page_ration()
+
 
 
