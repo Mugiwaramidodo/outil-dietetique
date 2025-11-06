@@ -1,0 +1,2 @@
+id,date_creation,date_maj,nom,prenom,sexe,age,taille_cm,poids_kg,poids_initial_kg,objectif,sport,seances_semaine,grignote,repas_par_jour,aliments_ok,aliments_ko,allergies,antecedents,traitements,tabac,alcool,digestion,appetit,imc,imc_cat,dej_mj,dej_kcal,nap,pct_perte_prise
+bf482bfb-494c-4524-8106-f14d3b4f619a,2025-11-06T21:38:12,2025-11-06T21:38:12,test,test,Femme,0,0,0.0,0.0,Perte de poids,,0,Non,3,,,,,,Non,Non,Normale,Normal,,,,,1.63,
