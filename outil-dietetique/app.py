@@ -183,7 +183,7 @@ def pdf_ration(df_ration, P,L,G,kcal,kJ, df_rep, total_kcal_j, total_kJ_j):
 st.sidebar.title("🔐 Connexion")
 if "user_id" not in st.session_state:
     with st.sidebar.form("login_form"):
-        ident = st.text_input("Identifiant diététicien·ne (ex: rim.nutri)")
+        ident = st.text_input("Bonjour veuillez entrez votre identifiant! )")
         ok = st.form_submit_button("Se connecter")
     if ok and ident.strip():
         ensure_user_space(ident)
